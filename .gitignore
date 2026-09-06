@@ -16,16 +16,6 @@ data/raw/*
 data/processed/*
 !data/processed/.gitkeep
 
-# MLflow tracking store
-mlruns/*
-!mlruns/.gitkeep
-
-# Monitoring reports (generated)
-monitoring/reports/*.html
-
-# Notebooks checkpoints
-.ipynb_checkpoints/
-
 # OS
 .DS_Store
 Thumbs.db
