@@ -434,109 +434,72 @@ fraud-detection-system/
 
 ## Future Scope & Improvements
 
-This section outlines a structured roadmap to evolve the current notebook-based study (`fraud_detection.ipynb:1`) into a production-grade, research-competitive fraud detection system. Items are prioritized by impact.
+This section outlines general, practical improvements to make the current notebook-based study (`fraud_detection.ipynb:1`) more accurate and scalable in real-world conditions.
 
-### 1. Modeling — From Baselines to State-of-the-Art for Tabular Fraud
+### A. Improving Accuracy
 
-| Area | Current State | Proposed Improvement | Expected Impact |
-|------|--------------|---------------------|-----------------|
-| **Gradient boosting** | `sklearn` GBC with stumps (`n_estimators=50, max_depth=1`) | **XGBoost / LightGBM / CatBoost** with native handling of imbalance (`scale_pos_weight`, `is_unbalance`), leaf-wise growth, and GPU acceleration | PR-AUC +5–12% on ULB; industry standard for tabular fraud |
-| **Ensembles & stacking** | Single models evaluated in isolation | Stacking / voting ensemble (e.g., Shallow NN + LightGBM + Logistic Regression) with calibrated meta-learner; bagging with balanced subsamples (EasyEnsemble, BalancedRandomForest) | Reduced variance; tighter confidence intervals on n=18 fraud val set |
-| **Cost-sensitive & focal learning** | `LinearSVC(class_weight='balanced')` only | Focal loss (`tensorflow_addons`), class-weighted cross-entropy, and threshold-moving via `cost_matrix` (false-negative cost >> false-positive cost) | Direct optimization for business cost, not just F1 |
-| **Anomaly / unsupervised detection** | Supervised only | Autoencoder / Variational Autoencoder trained on legitimate transactions; reconstruction error as fraud score. Isolation Forest / One-Class SVM baselines | Detects novel fraud patterns with zero labeled examples; complements supervised models |
-| **Sequential & deep tabular models** | 2-unit shallow NN (73 params) | TabNet, FT-Transformer, TabPFN for tabular attention; LSTM/Temporal-CNN on transaction sequences per cardholder (requires IEEE-CIS dataset with card IDs) | Captures temporal dependencies that PCA features obscure |
-| **Hyperparameter optimization** | Manual defaults | Optuna / Ray Tune with PR-AUC objective, stratified time-series cross-validation, and early stopping | Systematic gain without manual trial-and-error |
+Accuracy in fraud detection is not about overall accuracy — it is about catching more fraud with fewer false alarms under extreme imbalance (0.17% fraud).
 
-### 2. Data & Feature Engineering
+#### 1. Better Data and Feature Engineering
 
-**Current limitation:** `V1`–`V28` are PCA-anonymized (`fraud_detection.ipynb:1`), so domain features cannot be engineered. `Amount` and `Time` are the only interpretable signals.
+- **Richer features from existing signals:** Derive hour-of-day, time-since-last-transaction, and transaction velocity (count and total amount in the last N hours) from `Time`; rolling statistics on `Amount` to capture behavioral deviation. Current `V1`–`V28` are PCA-anonymized (`fraud_detection.ipynb:1`), which limits domain feature design — moving to a dataset with raw attributes (e.g., merchant, device, card history) would unlock far stronger signals.
+- **Preserve information when balancing:** Replace random undersampling (which discards 99.8% of legitimate transactions) with SMOTE, ADASYN, or Borderline-SMOTE for synthetic minority oversampling, or use class-weighted losses that keep all data.
+- **Feature selection:** Apply permutation importance and correlation pruning on `V1`–`V28` to remove noisy components and reduce overfitting.
 
-| Improvement | Description | Effort |
-|-------------|-------------|--------|
-| **Temporal features** | Hour-of-day, day-of-week, time-since-last-transaction, transaction velocity (count/amount in last N hours) | Low — derived from `Time` |
-| **Behavioral aggregates** | Rolling mean/std of `Amount` per time window, distance from cardholder centroid (if card ID available) | Medium — requires grouping key |
-| **Graph features** | Merchant–cardholder bipartite graph; PageRank / community detection to flag fraud rings | High — needs merchant/card identifiers |
-| **Dataset upgrade** | Migrate to **IEEE-CIS Fraud Detection** (~1.2 GB, raw categorical + transaction + identity tables) | Medium — unlocks realistic feature engineering and joins |
-| **Synthetic augmentation** | Replace naive undersampling with **SMOTE, ADASYN, Borderline-SMOTE** (`imbalanced-learn`), or generative models (CTGAN, TabDDPM) for minority oversampling | Low–Medium — preserves majority information while balancing |
-| **Feature selection & importance** | Permutation importance, SHAP-based selection, and correlation pruning on `V1`–`V28` to reduce noise | Low |
+#### 2. Stronger Modeling
 
-### 3. Evaluation & Validation Maturity
+- **Modern gradient boosting:** Replace the baseline `sklearn` GBC stumps (`fraud_detection.ipynb:15`) with XGBoost, LightGBM, or CatBoost. They provide native imbalance handling (`scale_pos_weight`), leaf-wise growth, regularization, and GPU acceleration, typically improving PR-AUC by 5–12% on this dataset.
+- **Ensembles and stacking:** Combine diverse models (e.g., shallow NN + gradient boosting + logistic regression) via voting or stacking with a calibrated meta-learner to reduce variance. On a validation set with only 18 fraud cases, this stabilizes performance estimates.
+- **Cost-sensitive learning:** Move beyond `class_weight='balanced'` to focal loss and class-weighted cross-entropy where a false negative (missed fraud) costs significantly more than a false positive (manual review).
+- **Anomaly detection as complement:** Train autoencoders or variational autoencoders on legitimate transactions only and use reconstruction error as a fraud score. This catches novel fraud patterns with no labeled examples and pairs well with supervised models.
+- **Systematic tuning:** Use Optuna or Ray Tune with PR-AUC as the objective, time-series cross-validation, and early stopping instead of manual defaults.
 
-| Gap Today | Improvement | Why It Matters |
-|-----------|-------------|----------------|
-| Accuracy reported; no PR-AUC / ROC-AUC (`fraud_detection.ipynb:29` noted) | Add `average_precision_score` (PR-AUC), `roc_auc_score`, and **Precision-Recall curves** per model; use PR-AUC as primary selector | Only discriminative metric under 0.17% prevalence |
-| Single temporal split; fraud val n=18 → wide CIs | **Time-series cross-validation** (expanding window), stratified K-fold, and bootstrapped CIs for precision/recall | Reliable model comparison; current 0.71 vs 0.62 F1 gap may not be significant |
-| Fixed 0.5 threshold | **Threshold tuning** via F-beta (F2 for recall-weighted fraud), Youden's J, or cost-optimal threshold on `x_test` | Moves operating point to business optimum (e.g., 5:1 cost of FN:FP) |
-| No calibration | **Platt scaling / isotonic regression** + reliability diagrams, Expected Calibration Error (ECE), Brier score | Required for probability-based downstream actions (manual review queues, risk scoring) |
-| No statistical testing | McNemar / paired bootstrap tests for model-vs-model fraud-F1 differences | Prevents overclaiming small F1 deltas |
+#### 3. More Rigorous Evaluation
 
-### 4. MLOps & Productionization
+- **Use the right metrics:** Add PR-AUC (average precision), ROC-AUC, and full precision-recall curves. PR-AUC is the primary discriminator when prevalence is 0.17%; accuracy is not informative (`Comparative Analysis: The accuracy trap`).
+- **Tune the decision threshold:** The default 0.5 threshold is rarely optimal. Tune for F2 (recall-weighted), business cost (e.g., 5:1 cost of missed fraud vs. false alarm), or precision@k on a held-out test set.
+- **Calibrate probabilities:** Apply Platt scaling or isotonic regression and measure calibration via reliability diagrams, Expected Calibration Error (ECE), and Brier score. Calibrated scores are required for risk-ranked review queues.
+- **Reduce variance:** Replace the single temporal split with expanding-window time-series cross-validation or stratified K-fold with bootstrapped confidence intervals. Add statistical tests (McNemar, paired bootstrap) before claiming one model beats another.
 
-```
-Current:  notebook → manual .keras checkpoint
-Target:   Raw Data → Feature Pipeline → Training (tracked) → Registry → Serving → Monitoring
-```
+### B. Improving Scalability
 
-| Component | Tooling | Next Step |
-|-----------|-----------------------------|-----------|
-| **Experiment tracking** | MLflow Tracking | Wrap training in `src/training/train.py` with `mlflow.log_params / log_metrics`; log PR-AUC, confusion matrices, and artifacts per run |
-| **Model registry** | MLflow Model Registry | `src/registry/promote_model.py` to version and stage (`Staging` → `Production`); enforce validation gate (PR-AUC > threshold on holdout) |
-| **Feature pipeline** | `src/features/build_features.py` | Extract preprocessing (`RobustScaler`, time normalization) from notebook into importable, tested module with `fit` on train only (prevent leakage) |
-| **Serving** | FastAPI + Uvicorn (`src/serving/main.py`) | `/predict`, `/health`, `/explain` endpoints; Pydantic schemas (`schemas.py`); load model from registry via `model_loader.py` |
-| **Containerization** | Docker + docker-compose | `deployment/Dockerfile` + `docker-compose.yml` (MLflow + FastAPI + monitoring) for `docker-compose up` reproducibility |
-| **CI/CD** | GitHub Actions | Lint, `pytest`, notebook execution test, and MLflow model validation on PR |
-| **Deployment** | Render / Fly.io free tier | Live demo endpoint for portfolio |
+Scalability covers data volume, training time, inference latency, and operational overhead — not just model size.
 
-### 5. Explainability, Trust & Human-in-the-Loop
+#### 1. Scalable Data Processing
 
-| Capability | Implementation | Stakeholder Value |
-|------------|----------------|-------------------|
-| **SHAP values** | `shap.TreeExplainer` / `DeepExplainer` per prediction (`src/explain/shap_explainer.py`) | Feature-level attribution for every flagged transaction |
-| **LLM explanation layer** | `src/explain/llm_explainer.py` via Anthropic/OpenAI API — converts SHAP output to plain English: *"Flagged due to unusually high amount ($2,400 vs. $22 median) and anomalous V14/V17 pattern"* | Non-technical fraud analyst can act without ML expertise |
-| **Counterfactuals** | DiCE / Alibi — "What minimal change would flip this prediction to legitimate?" | Actionable recourse and false-positive triage |
-| **Global interpretability** | SHAP summary / dependence plots, partial dependence on `Amount`/`Time` | Model audit and regulator compliance |
+- **Decouple preprocessing from the notebook:** Extract `RobustScaler` and time normalization (`fraud_detection.ipynb:5`) into a reusable, tested module that fits only on training data to prevent leakage and can be reused in batch and online pipelines.
+- **Handle larger datasets:** For datasets beyond the 284K-row ULB set, use columnar formats (Parquet), chunked processing with Dask or Spark, and a feature store (e.g., Feast) for point-in-time correct, reusable transformations.
 
-### 6. Monitoring, Drift & Retraining
+#### 2. Scalable Training
 
-| Signal | Tool | Action |
-|--------|------|--------|
-| **Data drift** | Evidently AI (`src/monitoring/drift_report.py`) — compare live `V1`–`V28`/`Amount` distributions vs. training | Alert when PSI / KS-test exceeds threshold |
-| **Prediction drift** | Track fraud-score distribution shift | Detect silent concept drift as fraudsters adapt |
-| **Performance drift** | Delayed labels — monitor precision@k and review-queue conversion rate | Trigger retraining when PR-AUC drops > X% |
-| **Scheduled checks** | `src/monitoring/scheduled_check.py` cron job + Grafana dashboard (`monitoring/grafana/`) | Automated daily drift report (HTML via Evidently) |
-| **Retraining strategy** | Incremental / online learning vs. full retrain; champion–challenger A/B on registry | Prevents catastrophic forgetting while adapting to new fraud patterns |
+- **Distributed and accelerated training:** LightGBM/XGBoost with histogram-based training and GPU support scales to millions of rows without code changes. For neural networks, use mixed-precision and data-parallel training.
+- **Experiment tracking and registry:** Track every run (parameters, PR-AUC, confusion matrices, artifacts) with MLflow or Weights & Biases, version models in a registry, and gate promotion on holdout PR-AUC. This avoids manual `.keras` checkpoint handling (`fraud_detection.ipynb:11`) and enables reproducibility.
+- **Automated pipelines:** Orchestrate preprocessing → training → evaluation → registration with a pipeline tool (e.g., Prefect, Airflow) and CI checks (lint, unit tests, notebook execution) on every change.
 
-### 7. Real-Time & Scale
+#### 3. Scalable and Reliable Inference
 
-- **Streaming inference:** Kafka / Kinesis consumer → feature store (Feast) → FastAPI low-latency endpoint (p50 < 50 ms).
-- **Feature store:** Centralized `Amount`/`Time` transformations and velocity features with point-in-time correctness.
-- **Scalability:** Horizontal scaling of FastAPI (Uvicorn workers), model caching, and batch prediction for offline scoring of historical ledgers.
-- **Latency budget:** Quantize / distill shallow NN or LightGBM for edge deployment if sub-10 ms required.
+- **API serving:** Serve the best model behind a FastAPI (or gRPC) service with `/predict` and `/health` endpoints, Pydantic validation, and model loading from the registry. This replaces ad-hoc `model.predict()` calls in the notebook.
+- **Containerization and orchestration:** Package the service with Docker and deploy on Kubernetes or a managed container platform with horizontal auto-scaling, load balancing, and rolling updates. Cache models in memory and support batch prediction for offline scoring of historical ledgers.
+- **Latency optimization:** For real-time authorization (p50 < 50 ms), consider model quantization, distillation, or using LightGBM which is typically faster than neural networks on tabular data. Use async I/O and worker scaling (Uvicorn/Gunicorn) for throughput.
+- **Streaming architecture (when needed):** For high-throughput environments, add a Kafka/Kinesis consumer that enriches transactions from the feature store and calls the inference service; keep a synchronous fast path for low-latency decisions and an async path for monitoring and logging.
 
-### 8. Security, Privacy & Compliance
+#### 4. Monitoring, Maintenance, and Operations
 
-- **PII & anonymization:** ULB dataset is already PCA-anonymized; IEEE-CIS migration requires tokenization and vaulting of card identifiers.
-- **Federated learning:** Train across banks without sharing raw transactions (Flower / FedML).
-- **Differential privacy:** Add DP-SGD for NN training when sharing model weights externally.
-- **Auditability:** Immutable MLflow run lineage, model cards, and explainability logs for regulatory review (PCI-DSS, GDPR).
+- **Drift detection:** Monitor data drift (feature distributions for `Amount`, `V1`–`V28`), prediction drift (fraud-score shift), and performance drift (precision@k, PR-AUC on delayed labels) with tools like Evidently AI. Alert on PSI or KS-test thresholds.
+- **Retraining strategy:** Define when to retrain — incremental updates vs. full retrain, and champion–challenger A/B testing before promoting a new version. This handles concept drift as fraud patterns evolve.
+- **Observability:** Add structured logging, metrics (Prometheus), and dashboards (Grafana) for request rate, latency, error rate, and fraud-rate trends.
+- **Security and compliance:** Keep the current PCA anonymization for privacy; for richer datasets, add tokenization of card identifiers, audit trails, and model cards for regulatory review. Consider federated learning if training across institutions without sharing raw data, and differential privacy when sharing model artifacts.
 
-### 9. Research & Stretch Goals
+#### 5. Practical Roadmap (Accuracy + Scalability)
 
-- **Cost-sensitive active learning:** Prioritize uncertain / high-risk transactions for human labeling to grow the 492-fraud set efficiently.
-- **Graph neural networks** for fraud-ring detection on transaction graphs.
-- **Causal inference:** Distinguish correlation (e.g., high `Amount` correlates with fraud) from causal drivers to avoid spurious blocks.
-- **Multi-modal fusion:** Combine tabular transaction data with text (merchant descriptions) and behavioral biometrics.
-
-### Suggested Roadmap
-
-| Phase | Duration | Deliverable |
-|-------|----------|-------------|
-| **Phase 1 — Correctness** | 1 weekend | Fix evaluation bugs (`fraud_detection.ipynb:29,32`), add PR-AUC/threshold tuning/calibration, time-series CV |
-| **Phase 2 — Modeling uplift** | 2 weekends | XGBoost/LightGBM + SMOTE + Optuna; ensemble vs. shallow NN bake-off on PR-AUC |
-| **Phase 3 — MLOps foundation** | 2 weekends | `src/features` + `src/training` + MLflow tracking + Model Registry |
-| **Phase 4 — Serving & explainability** | 1 weekend | FastAPI + SHAP + LLM explanation layer |
-| **Phase 5 — Monitoring & deploy** | 1 weekend | Evidently drift + Grafana + Docker + Render/Fly.io deploy |
-| **Phase 6 — Scale & research** | Ongoing | Streaming, feature store, GNN / autoencoder experiments, IEEE-CIS migration |
+| Priority | Focus | Example Deliverable | Impact |
+|----------|-------|---------------------|--------|
+| **High** | Evaluation correctness | Fix evaluation bugs (`fraud_detection.ipynb:29,32`), add PR-AUC, threshold tuning, calibration, and time-series CV | Trustworthy model comparison; avoids shipping a misleading 0.96 F1 that collapses in production |
+| **High** | Modeling uplift | LightGBM/XGBoost + SMOTE or class-weighted loss + Optuna tuning; ensemble bake-off | Direct lift in fraud recall and precision |
+| **Medium** | Pipeline modularization | Reusable preprocessing and training modules, tracked experiments, model registry | Reproducibility, scalability, and safe promotion to production |
+| **Medium** | Serving and scalability | Containerized FastAPI service with auto-scaling, batch + real-time paths | Handles growth from thousands to millions of transactions per day |
+| **Medium** | Monitoring | Drift reports and performance dashboards with automated retraining triggers | Prevents silent degradation as fraud tactics change |
+| **Lower** | Advanced research | Autoencoder anomaly detection, graph-based fraud-ring features, richer datasets | Long-term differentiation for novel or coordinated fraud |
 
 ---
 
